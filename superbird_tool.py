@@ -12,6 +12,11 @@ import shutil
 import sys
 import tempfile
 import time
+from pathlib import Path
+
+# Resolved once so the tool works regardless of CWD.
+SCRIPT_DIR = Path(__file__).resolve().parent
+STOCK_ENV_PATH = SCRIPT_DIR / 'stock_env.txt'
 
 from superbird_device import (
     SuperbirdDevice,
@@ -232,7 +237,7 @@ def cmd_bulkcmd_shell(args, dev):
     print("Entering shell. Use Ctrl+C to exit\n"
           "If valid commands fail, u-boot may be in a bad state.\n"
           "Just a note, bulkcmd is unable to display the output of commands.\n"
-          "Refer to 'uboot-command-reference.md' to get a list of commands.")
+          "Refer to 'uboot-command-reference.txt' to get a list of commands.")
     while True:
         try:
             cmd = input("bulkcmd: ")
@@ -395,7 +400,7 @@ def cmd_restore_stock_env(args, dev):
     time.sleep(1)
     dev.bulkcmd('amlmmc erase env')
     time.sleep(1)
-    dev.send_env_file('stock_env.txt')
+    dev.send_env_file(str(STOCK_ENV_PATH))
     dev.bulkcmd('env save')
 
 

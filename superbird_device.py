@@ -625,7 +625,9 @@ class SuperbirdDevice:
                 with open(outfile, 'wb') as ofl:
                     offset = 0
                     if part_name == 'bootloader':
-                        # when writing bootloader, it is actually written one sector after beginning of the partition
+                        # `amlmmc read bootloader` starts at offset 0 within the partition's
+                        # content area; the first sector is a header. Without this skip the
+                        # legacy dump differs from the fast (`upload store`) dump by 1 byte.
                         offset = self.PART_SECTOR_SIZE
                     first_chunk = True
                     last_chunk = False
@@ -691,8 +693,6 @@ class SuperbirdDevice:
                     last_chunk = False
                     remaining = part_size
                     start_time = time.time()
-                    # TODO right now get_status always fails, it does not seem to be tracking our write progress
-                    # self.device.bulkCmd(f'download store {part_name} normal {hex(part_size)}')
                     while remaining:
                         if first_chunk:
                             first_chunk = False
@@ -722,7 +722,6 @@ class SuperbirdDevice:
                         offset += chunk_size
                         if last_chunk:
                             break
-                    # self.bulkcmd('download get_status', silent=False)  #  get_status always fails
             except Exception as ex:
                 # in the event of any failure while writing partitions,
                 #   force the entire script to exit to prevent further possible damage
