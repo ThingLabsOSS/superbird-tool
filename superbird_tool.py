@@ -208,17 +208,9 @@ def cmd_burn_mode(args, dev):
     if check_device_mode('usb-burn', silent=True):
         print('Device already in USB Burn Mode')
         return
-    if not check_device_mode('usb'):
-        return
-    print('Entering USB Burn Mode')
-    dev.bl2_boot(str(IMAGES_PATH / 'superbird.bl2.encrypted.bin'),
-                 str(IMAGES_PATH / 'superbird.bootloader.img'))
-    print('Waiting for device...')
-    time.sleep(5)
-    if check_device_mode('usb-burn'):
-        print('Device is now in USB Burn Mode')
-    else:
-        print('Failed to enter USB Burn Mode!')
+    if enter_burn_mode(dev) is None:
+        sys.exit(1)
+    print('Device is now in USB Burn Mode')
 
 
 def cmd_continue_boot(args, dev):

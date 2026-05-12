@@ -69,35 +69,36 @@ class BulkcmdException(Exception):
     So we can catch this specifically
     """
 
+# (vendor_id, product_id) pairs that the superbird presents at each boot stage
+_VID_PID_NORMAL = (0x18d1, 0x4e40)   # adb/usbnet gadget after a normal boot
+_VID_PID_AMLOGIC = (0x1b8e, 0xc003)  # amlogic ROM / bootloader USB endpoint
+
 def find_device(silent:bool=False):
-    """ Find a superbird device and return its mode
-        modes: normal, usb, usb-burn
+    """ Find a superbird device and return its mode.
+        modes: 'normal', 'usb', 'usb-burn', 'not-found'
     """
+    def say(msg):
+        if not silent:
+            print(msg)
     try:
-        found_devices = usb.core.find(idVendor=0x18d1, idProduct=0x4e40)
-        if found_devices is not None:
-            dev_product = found_devices[0].device.product
-            if not silent:
-                print('Found device booted normally, with USB Gadget (adb/usbnet) enabled')
+        if usb.core.find(idVendor=_VID_PID_NORMAL[0], idProduct=_VID_PID_NORMAL[1]) is not None:
+            say('Found device booted normally, with USB Gadget (adb/usbnet) enabled')
             return 'normal'
-        found_devices = usb.core.find(idVendor=0x1b8e, idProduct=0xc003)
-        if found_devices is not None:
-            dev_product = found_devices[0].device.product
-            # I don't understand it, just documenting it and fixing the bug.
-            # --burn_mode somehow has dev_product set to M8-CHIP, --find_device has dev_product be None
-            if dev_product is None or dev_product == "M8-CHIP": 
-                if not silent:
-                    print('Found device booted in USB Burn Mode (ready for commands)')
-                return 'usb-burn'
-            elif dev_product == 'GX-CHIP':
-                if not silent:
-                    print('Found device booted in USB Mode (buttons 1 & 4 held at boot)')
+        dev = usb.core.find(idVendor=_VID_PID_AMLOGIC[0], idProduct=_VID_PID_AMLOGIC[1])
+        if dev is not None:
+            # Same VID/PID for both USB modes — the product string disambiguates.
+            # 'GX-CHIP' is the ROM (buttons 1+4 at power-on), 'M8-CHIP' is post-bl2_boot,
+            # and find_device sometimes sees None even though the device is in burn mode.
+            product = dev.product
+            if product == 'GX-CHIP':
+                say('Found device booted in USB Mode (buttons 1 & 4 held at boot)')
                 return 'usb'
-        if not silent:
-            print('No device found!')
+            if product is None or product == 'M8-CHIP':
+                say('Found device booted in USB Burn Mode (ready for commands)')
+                return 'usb-burn'
+        say('No device found!')
     except Exception:
-        if not silent:
-            print('Found a potential device that is not ready')
+        say('Found a potential device that is not ready')
     return 'not-found'
 
 _MODE_HINTS = {
@@ -187,6 +188,7 @@ class SuperbirdDevice:
     FAST_WRITE_ACK_LEN = 0x200
     FAST_WRITE_RESEND_TIMES = 3
     FAST_WRITE_ACK_TIMEOUT = 10.0      # seconds
+    FAST_WRITE_RETRY_LIMIT = 3         # whole-partition retries (each restarts download store from byte 0)
 
     # legacy-path chunk-size multiplier per burn-speed setting (1 = slowest, 8 = default)
     _BURN_SPEED_MULTIPLIER = {'normal': 8, 'slow': 4, 'slower': 1}
@@ -510,55 +512,70 @@ class SuperbirdDevice:
     # ---------------------------------------------------------------------------
 
     def _restore_partition_fast(self, part_name:str, infile:str):
-        """ Restore a partition using writeMedia (download store protocol). """
-        self.bulkcmd('amlmmc part 1', silent=True)
+        """ Restore a partition using writeMedia (download store protocol).
+            Per-partition retry on USB errors: each retry restarts the entire
+            `download store` sequence from byte 0, so partial writes are simply
+            overwritten — no risk of a half-written partition surviving a retry.
+        """
         (part_size, part_offset) = self.validate_partition_size(part_name)
         if part_size is None:
             raise ValueError('Failed to validate partition size!')
-        try:
-            file_size = os.path.getsize(infile)
-            if part_name == 'bootloader':
-                part_size = 2 * 1024 * 1024
-                file_size = part_size
-            if file_size > part_size:
-                raise ValueError(f'File is larger than target partition: {file_size} vs {part_size}')
+        file_size = os.path.getsize(infile)
+        if part_name == 'bootloader':
+            part_size = 2 * 1024 * 1024
+            file_size = part_size
+        if file_size > part_size:
+            raise ValueError(f'File is larger than target partition: {file_size} vs {part_size}')
 
-            self.bulkcmd(f'download store {part_name} normal {hex(file_size)}', silent=True)
-            block_size = self.FAST_WRITE_BLOCK
-            with open(infile, 'rb') as ifl:
-                sent = 0
-                seq = 0
-                first_chunk = True
-                start_time = time.time()
-                while sent < file_size:
-                    data = ifl.read(block_size)
-                    if not data:
-                        break
-                    self._fast_write_block(data, seq)
-                    sent += len(data)
-                    seq += 1
-                    if first_chunk:
-                        first_chunk = False
-                    else:
-                        stdout_clear_lines(2)
-                    elapsed = max(time.time() - start_time, 1e-3)
-                    speed = sent / elapsed / 1024 / 1024
-                    progress = round((sent / file_size) * 100)
-                    self.print(f'writing partition: "{part_name}" {hex(part_offset)}+{hex(sent)} from file: {infile}')
-                    self.print(f'block: {len(data)/1024:.0f}KB | speed: {speed:.2f}MB/s | progress: {progress}% | {round(sent/1024/1024)}/{round(file_size/1024/1024)}MB')
-            # Finalize. Bootloader writes commonly hang on this status command.
-            ignore = (part_name == 'bootloader')
+        for attempt in range(self.FAST_WRITE_RETRY_LIMIT):
             try:
-                self.bulkcmd('download get_status', silent=True, ignore_timeout=ignore)
-            except Exception:
-                if not ignore:
-                    raise
-            if part_name == 'bootloader':
-                time.sleep(2)
-        except Exception as ex:
-            print(f'Error while restoring partition {part_name}, {ex}')
-            print(traceback.format_exc())
-            sys.exit(1)
+                self._fast_write_partition(part_name, infile, file_size, part_offset)
+                return
+            except (USBError, USBTimeoutError, RuntimeError, TimeoutError) as ex:
+                self.print(f'  fast restore of "{part_name}" failed (attempt {attempt+1}/{self.FAST_WRITE_RETRY_LIMIT}): {ex}')
+                self._fast_reopen()
+            except Exception as ex:
+                print(f'Error while restoring partition {part_name}, {ex}')
+                print(traceback.format_exc())
+                sys.exit(1)
+        print(f'Error: exceeded retry limit restoring partition {part_name}')
+        sys.exit(1)
+
+    def _fast_write_partition(self, part_name, infile, file_size, part_offset):
+        """ Inner write loop. Issues one `download store` bulkcmd and streams the file. """
+        self.bulkcmd('amlmmc part 1', silent=True)
+        self.bulkcmd(f'download store {part_name} normal {hex(file_size)}', silent=True)
+        block_size = self.FAST_WRITE_BLOCK
+        with open(infile, 'rb') as ifl:
+            sent = 0
+            seq = 0
+            first_chunk = True
+            start_time = time.time()
+            while sent < file_size:
+                data = ifl.read(block_size)
+                if not data:
+                    break
+                self._fast_write_block(data, seq)
+                sent += len(data)
+                seq += 1
+                if first_chunk:
+                    first_chunk = False
+                else:
+                    stdout_clear_lines(2)
+                elapsed = max(time.time() - start_time, 1e-3)
+                speed = sent / elapsed / 1024 / 1024
+                progress = round((sent / file_size) * 100)
+                self.print(f'writing partition: "{part_name}" {hex(part_offset)}+{hex(sent)} from file: {infile}')
+                self.print(f'block: {len(data)/1024:.0f}KB | speed: {speed:.2f}MB/s | progress: {progress}% | {round(sent/1024/1024)}/{round(file_size/1024/1024)}MB')
+        # Finalize. Bootloader writes commonly hang on this status command.
+        ignore = (part_name == 'bootloader')
+        try:
+            self.bulkcmd('download get_status', silent=True, ignore_timeout=ignore)
+        except Exception:
+            if not ignore:
+                raise
+        if part_name == 'bootloader':
+            time.sleep(2)
 
     def _fast_write_block(self, data, seq):
         """ Send one writeMedia block and read its ack, with the Continue:32 retry handshake
