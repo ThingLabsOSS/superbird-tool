@@ -208,9 +208,9 @@ def cmd_burn_mode(args, dev):
     if check_device_mode('usb-burn', silent=True):
         print('Device already in USB Burn Mode')
         return
+    # enter_burn_mode prints its own "Device is now in USB Burn Mode" on success.
     if enter_burn_mode(dev) is None:
         sys.exit(1)
-    print('Device is now in USB Burn Mode')
 
 
 def cmd_continue_boot(args, dev):

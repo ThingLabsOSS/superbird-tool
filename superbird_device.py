@@ -139,16 +139,27 @@ def enter_burn_mode(dev):
             if check_device_mode('usb-burn', silent=True):
                 break
             wait_time += 1
-        if check_device_mode('usb-burn'):
-            print('Device is now in USB Burn Mode')
-            time.sleep(0.5)
-            dev = SuperbirdDevice()
-            time.sleep(1)
-            dev.bulkcmd('amlmmc part 1')
-            return dev
-        else:
+        if not check_device_mode('usb-burn'):
             print('Failed to enter USB Burn Mode!')
             return None
+        print('Device is now in USB Burn Mode')
+        time.sleep(2)  # let USB endpoints settle before reopening
+        dev = SuperbirdDevice()
+        # USB enumeration finishes well before u-boot's bulkcmd handler is
+        # actually ready. Empirically the handler needs ~3-5 seconds after
+        # enumeration to start responding. Poll a no-op bulkcmd with patience,
+        # using pyamlboot's raw bulkCmd (which raises) rather than the wrapper
+        # (which sys.exits) so we can retry transparently.
+        for _ in range(8):
+            time.sleep(1)
+            try:
+                dev.device.bulkCmd('amlmmc part 1')
+                return dev
+            except (USBTimeoutError, USBError):
+                continue
+        print('Device entered USB Burn Mode but is not responding to bulkcmds.')
+        print('Try power-cycling and running --burn_mode again.')
+        return None
     else:
         print(f'Cannot enter burn mode from current mode: {dev_mode}')
         return None
@@ -302,8 +313,10 @@ class SuperbirdDevice:
         self.write(address, file_data, chunk_size, append_zeros)
 
     def bl2_boot(self, bl2_file:str, bootloader_file:str):
-        """ send a bl2 and then chain a uboot image with it """
-        # TODO there is something wrong with bl2_boot
+        """ send a bl2 and then chain a uboot image with it.
+            The post-boot settle is handled by enter_burn_mode(); don't call bulkcmds
+            on the device for a few seconds after this returns.
+        """
         self.send_file(bl2_file, self.ADDR_BL2, chunk_size=4096, append_zeros=True)
         self.device.run(self.ADDR_BL2)
         data = None
