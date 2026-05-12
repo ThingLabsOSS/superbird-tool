@@ -240,6 +240,20 @@ def cmd_bulkcmd_shell(args, dev):
 
 
 @requires_burn_mode
+def cmd_chainload(args, dev):
+    bin_path = args.chainload[0]
+    load_addr = int(args.load_addr[0], 0) if args.load_addr else 0x01080000
+    size = os.path.getsize(bin_path)
+    print(f'Chain-loading {bin_path} ({size} bytes) → {hex(load_addr)}')
+    dev.send_file(bin_path, load_addr)
+    print(f'Executing: go {hex(load_addr)}')
+    # `go` doesn't return, so we have to swallow the bulkcmd timeout.
+    dev.bulkcmd(f'go {hex(load_addr)}', ignore_timeout=True)
+    print('Control transferred. Watch UART for output.')
+    print('The device will not respond to further bulkcmds — power-cycle to reset.')
+
+
+@requires_burn_mode
 def cmd_boot_adb_kernel(args, dev):
     slot = validate_slot(args.boot_adb_kernel[0])
     print('Booting adb kernel on slot', slot)
@@ -440,6 +454,7 @@ DISPATCH = [
     ('convert_env_dump',        cmd_convert_env_dump,        False),
     ('bulkcmd',                 cmd_bulkcmd,                 True),
     ('bulkcmd_shell',           cmd_bulkcmd_shell,           True),
+    ('chainload',               cmd_chainload,               True),
     ('boot_adb_kernel',         cmd_boot_adb_kernel,         True),
     ('enable_uart_shell',       cmd_enable_uart_shell,       True),
     ('disable_avb2',            cmd_disable_avb2,            True),
@@ -527,6 +542,8 @@ U-Boot Enviroment:
 Advanced:
   --bulkcmd COMMAND     Run a uboot command on the device
   --bulkcmd_shell       Open a pseudo-shell for sending uboot commands
+  --chainload BINFILE   Load an aarch64 binary into RAM and `go` to it.
+                        Use --load_addr ADDR to override default (0x01080000).
   --enable_uart_shell   Enable Linux UART shell
 """
 
@@ -540,6 +557,9 @@ def build_parser():
     p.add_argument('--continue_boot',           action='store_true')
     p.add_argument('--bulkcmd',                 type=str, nargs=1, metavar='COMMAND')
     p.add_argument('--bulkcmd_shell',           action='store_true')
+    p.add_argument('--chainload',               type=str, nargs=1, metavar='BINFILE')
+    p.add_argument('--load_addr',               type=str, nargs=1, metavar='ADDR',
+                   help='override load address for --chainload (default 0x01080000)')
     p.add_argument('--boot_adb_kernel',         type=str, nargs=1, metavar='BOOT_SLOT')
     p.add_argument('--enable_uart_shell',       action='store_true')
     p.add_argument('--disable_avb2',            type=str, nargs=1, metavar='BOOT_SLOT')
