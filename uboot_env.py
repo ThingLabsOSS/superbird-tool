@@ -56,16 +56,20 @@ import struct
 
 def read_environ(file):
     """ Reads the u-boot environment variables from a partition dump file.
-        returns a tuple containing: env as a dict, length of data in file, wether crc match
+        returns a tuple containing: env as a dict, length of data in file, whether crc matches
     """
-    data = None
     with open(file, "rb") as evf:
         data = evf.read()
     (crc,) = struct.unpack("I", data[0:4])
     real_data = data[4:]
     real_crc = binascii.crc32(real_data) & 0xffffffff
+    # Env data is `\0`-terminated key=value entries terminated overall by a
+    # double-`\0`. Anything past that point is partition padding that isn't
+    # ascii — slicing here keeps `.decode()` from blowing up on raw flash bytes.
+    end = real_data.find(b'\x00\x00')
+    payload = real_data if end < 0 else real_data[:end + 1]
     environ = {}
-    for segment in real_data.decode('ascii').split("\x00"):
+    for segment in payload.decode('ascii').split("\x00"):
         if not segment:
             break
         key, value = segment.split('=', 1)

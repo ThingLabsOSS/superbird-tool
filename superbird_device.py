@@ -10,10 +10,13 @@ import time
 import traceback
 import platform
 
+import struct
+
 try:
     from pyamlboot import pyamlboot
     from usb.core import USBTimeoutError, USBError
     import usb.core
+    import usb.util
 except ImportError:
     print("""
     ###########################################################################################
@@ -52,9 +55,14 @@ except ImportError:
     """)
     sys.exit(1)
 
+from pathlib import Path
+
 from superbird_partitions import SUPERBIRD_PARTITIONS
 
 BURN_MODE_TIMEOUT = 10  # seconds, how long to wait for device to enter USB Burn Mode
+
+# images/ ships alongside this module; resolve once so we don't depend on CWD
+IMAGES_PATH = Path(__file__).resolve().parent / 'images'
 
 class BulkcmdException(Exception):
     """
@@ -92,25 +100,24 @@ def find_device(silent:bool=False):
             print('Found a potential device that is not ready')
     return 'not-found'
 
+_MODE_HINTS = {
+    'usb':      '     need to power on while holding buttons 1 & 4 to enter USB Mode',
+    'usb-burn': '     need to boot into USB Burn Mode',
+    'normal':   '     need to boot up normally first',
+}
+
 def check_device_mode(mode:str, silent:bool=False):
     """ confirm if device is in the mode we need """
-    dev_mode = find_device(silent=True)
-    if dev_mode != mode:
-        if not silent:
-            print('Device is not booted to the correct mode!')
-        if mode == 'usb':
-            if not silent:
-                print('     need to power on while holding buttons 1 & 4 to enter USB Mode')
-        elif mode == 'usb-burn':
-            if not silent:
-                print('     need to boot into USB Burn Mode')
-        elif mode == 'normal':
-            if not silent:
-                print('     need to boot up normally first')
+    if find_device(silent=True) == mode:
+        return True
+    if not silent:
+        print('Device is not booted to the correct mode!')
+        hint = _MODE_HINTS.get(mode)
+        if hint:
+            print(hint)
         if platform.system() == "Windows":
-                print("Make sure you've installed the correct driver using Zadig.")
-        return False
-    return True
+            print("Make sure you've installed the correct driver using Zadig.")
+    return False
 
 def enter_burn_mode(dev):
     """ check device mode and enter burn mode if needed
@@ -121,7 +128,8 @@ def enter_burn_mode(dev):
         return dev
     elif dev_mode == 'usb':
         print('Entering USB Burn Mode')
-        dev.bl2_boot('images/superbird.bl2.encrypted.bin', 'images/superbird.bootloader.img')
+        dev.bl2_boot(str(IMAGES_PATH / 'superbird.bl2.encrypted.bin'),
+                     str(IMAGES_PATH / 'superbird.bootloader.img'))
         print('Waiting for device...')
         # wait for it to boot up in USB Burn Mode
         wait_time = 0
@@ -169,15 +177,30 @@ class SuperbirdDevice:
     # writes larger than threshold will be broken into chunks of WRITE_CHUNK_SIZE
     TRANSFER_SIZE_THRESHOLD = 2 * 1024 * 1024  # 2MB
 
-    def __init__(self, slowBurn = False, slowerBurn = False) -> None:
-        if slowerBurn:
-            self.MULTIPLIER = 1
-            self.TRANSFER_BLOCK_SIZE = ( 8 * self.MULTIPLIER ) * self.PART_SECTOR_SIZE  # Base 4KB data transfered into memory one block at a time
-            self.WRITE_CHUNK_SIZE = ( 1024 * self.MULTIPLIER ) * self.PART_SECTOR_SIZE  # 512KB chunk written to memory, then gets written to mmc
-        elif slowBurn:
-            self.MULTIPLIER = 4
-            self.TRANSFER_BLOCK_SIZE = ( 8 * self.MULTIPLIER ) * self.PART_SECTOR_SIZE  # Base 4KB data transfered into memory one block at a time
-            self.WRITE_CHUNK_SIZE = ( 1024 * self.MULTIPLIER ) * self.PART_SECTOR_SIZE  # 512KB chunk written to memory, then gets written to mmc
+    # fast-path constants for the AMLC envelope upload protocol (see _dump_partition_fast)
+    AM_REQ_UPLOAD = 0x33
+    FAST_READ_SEGMENT_MAX = 65536      # device emits at most 64K per envelope on superbird
+    FAST_READ_BULK_CHUNK = 16384       # split each segment into 16K bulk reads
+    FAST_READ_RETRY_LIMIT = 10
+    # fast-path constants for the write side (pyamlboot writeMedia / download store, see _restore_partition_fast)
+    FAST_WRITE_BLOCK = 0x10000         # 64KB per writeMedia call, matches pyamlboot/optimus.py
+    FAST_WRITE_ACK_LEN = 0x200
+    FAST_WRITE_RESEND_TIMES = 3
+    FAST_WRITE_ACK_TIMEOUT = 10.0      # seconds
+
+    # legacy-path chunk-size multiplier per burn-speed setting (1 = slowest, 8 = default)
+    _BURN_SPEED_MULTIPLIER = {'normal': 8, 'slow': 4, 'slower': 1}
+
+    def __init__(self, slowBurn = False, slowerBurn = False, legacy_transfer = False) -> None:
+        # legacy_transfer forces the old amlmmc read/write + readSimpleMemory/writeLargeMemory path.
+        # the default uses the AMLC envelope upload protocol + writeMedia (download store) — see
+        # _dump_partition_fast / _restore_partition_fast. slow_burn/slower_burn only affect the
+        # legacy path's chunk sizing, so they also imply legacy mode.
+        self.legacy_transfer = legacy_transfer or slowBurn or slowerBurn
+        speed = 'slower' if slowerBurn else 'slow' if slowBurn else 'normal'
+        self.MULTIPLIER = self._BURN_SPEED_MULTIPLIER[speed]
+        self.TRANSFER_BLOCK_SIZE = (8 * self.MULTIPLIER) * self.PART_SECTOR_SIZE  # 4KB-multiple memory transfer block
+        self.WRITE_CHUNK_SIZE = (1024 * self.MULTIPLIER) * self.PART_SECTOR_SIZE  # 512KB-multiple mmc write chunk
         try:
             self.device = pyamlboot.AmlogicSoC()
         except ValueError:
@@ -215,6 +238,13 @@ class SuperbirdDevice:
         print(message)
         sys.stdout.flush()
 
+    _BULKCMD_TIMEOUT_HELP = (
+        " This can happen if the device ends up in a strange state, like as the result of a previously failed command\n"
+        " Try power cycling the device by pulling the cable, and then boot up and try again\n"
+        "  You might need to do this multiple times\n"
+        "    If the device is connected through a USB hub, try connecting it directly to a port on your machine"
+    )
+
     def bulkcmd(self, command:str, ignore_timeout=False, silent=False, is_shell = False):
         """ perform a bulkcmd, separated by semicolon """
         if not (is_shell or silent):
@@ -224,35 +254,21 @@ class SuperbirdDevice:
             response = self.decode(resp)
             if not silent:
                 self.print(f'  result: {response}')
-            if 'success' not in response:
-                if not is_shell:
-                    self.print(f'Bulkcmd failed: {command} -> {response}')
-                    raise BulkcmdException('Bulkcmd failed')
+            if 'success' not in response and not is_shell:
+                self.print(f'Bulkcmd failed: {command} -> {response}')
+                raise BulkcmdException('Bulkcmd failed')
             time.sleep(0.2)
-        except (USBTimeoutError, BulkcmdException) as ex:
-            # if you use booti or mw.b, it wont return, thus will raise USBTimeoutError
-            if [word for word in self.TIMEOUT_COMMANDS if word in command] or ignore_timeout:
+        except (USBTimeoutError, USBError, BulkcmdException) as ex:
+            # booti/mw.b/etc never return — that's expected. On Windows, the underlying
+            # timeout surfaces as a generic USBError rather than USBTimeoutError.
+            is_expected_timeout = ignore_timeout or any(w in command for w in self.TIMEOUT_COMMANDS)
+            if is_expected_timeout:
                 if not silent:
                     self.print('  ...')
-            else:
-                self.print(f' Error ({ex.__class__.__name__}): bulkcmd timed out or failed!')
-                self.print(' This can happen if the device ends up in a strange state, like as the result of a previously failed command')
-                self.print(' Try power cycling the device by pulling the cable, and then boot up and try again')
-                self.print('  You might need to do this multiple times')
-                self.print('    If the device is connected through a USB hub, try connecting it directly to a port on your machine')
-                sys.exit(1)
-        except USBError:
-            # on Windows, raises USBError instead of USBTimeoutError
-            if [word for word in self.TIMEOUT_COMMANDS if word in command] or ignore_timeout:
-                if not silent:
-                    self.print('  ...')
-            else:
-                self.print(' Error: bulkcmd timed out!')
-                self.print(' This can happen if the device ends up in a strange state, like as the result of a previously failed command')
-                self.print(' Try power cycling the device by pulling the cable, and then boot up and try again')
-                self.print('  You might need to do this multiple times')
-                self.print('    If the device is connected through a USB hub, try connecting it directly to a port on your machine')
-                sys.exit(1)
+                return
+            self.print(f' Error ({ex.__class__.__name__}): bulkcmd timed out or failed!')
+            self.print(self._BULKCMD_TIMEOUT_HELP)
+            sys.exit(1)
 
     def write(self, address:int, data, chunk_size=8, append_zeros=True):
         """ write data to an address """
@@ -322,26 +338,15 @@ class SuperbirdDevice:
         self.bulkcmd(f'booti {hex(self.ADDR_KERNEL)} {hex(self.ADDR_INITRD)}')
 
     def read_memory(self, address, length):
-        """Read some data from memory"""
-        data = None
+        """Read some data from memory in 64-byte slurps"""
+        data = bytearray()
         offset = 0
         while length:
-            if length >= 64:
-                read_data = self.device.readSimpleMemory(address + offset, 64).tobytes()
-                if data is not None:
-                    data = data + read_data
-                else:
-                    data = read_data
-                length = length - 64
-                offset = offset + 64
-            else:
-                read_data = self.device.readSimpleMemory(address + offset, length).tobytes()
-                if data is not None:
-                    data = data + read_data
-                else:
-                    data = read_data
-                break
-        return data
+            this_read = min(64, length)
+            data += self.device.readSimpleMemory(address + offset, this_read).tobytes()
+            offset += this_read
+            length -= this_read
+        return bytes(data)
 
     def validate_partition_size(self, part_name):
         """ Validate the partition size by attempting to read the last sector
@@ -383,7 +388,227 @@ class SuperbirdDevice:
         return (part_size, part_offset)
 
     def dump_partition(self, part_name:str, outfile:str):
-        """ dump given partition to a file
+        """ dump given partition to a file, dispatching to fast or legacy implementation """
+        if self.legacy_transfer:
+            return self._dump_partition_legacy(part_name, outfile)
+        return self._dump_partition_fast(part_name, outfile)
+
+    def restore_partition(self, part_name:str, infile:str):
+        """ restore given partition from a file, dispatching to fast or legacy implementation """
+        if self.legacy_transfer:
+            return self._restore_partition_legacy(part_name, infile)
+        return self._restore_partition_fast(part_name, infile)
+
+    # ---------------------------------------------------------------------------
+    # Fast partition dump: AMLC-envelope "upload store" protocol.
+    #
+    # This is what the official Amlogic update tool speaks, and what superbird's
+    # u-boot expects in response to `upload store <part> normal <size>`. Unlike
+    # pyamlboot.readMedia (which speaks a newer ADNL/g12-style dialect that the
+    # superbird u-boot does NOT implement — it interprets `upload store ...` and
+    # then sits waiting for a download), this protocol:
+    #
+    #   1. We send one bulkcmd `upload store <part> normal <total_size>`.
+    #   2. For each segment the device wants to push, we issue a 16-byte
+    #      vendor-IN control transfer (bRequest=0x33, wValue=0x1000, wIndex=16)
+    #      and parse a `<II` header = (0xEFE8 magic, segment_length).
+    #   3. We bulk-read `segment_length` bytes from EP 0x81 in 16K chunks.
+    #   4. Repeat until total reached.
+    #
+    # The protocol details and the structure of _dump_partition_fast below were
+    # ported from dustinlieu/car-thing-bootloader-tool (DeviceBL3.read), which is
+    # MIT-licensed. See LICENSES/car-thing-bootloader-tool-MIT.txt for the full
+    # license text and attribution.
+    # ---------------------------------------------------------------------------
+
+    def _dump_partition_fast(self, part_name:str, outfile:str):
+        """ Dump a partition using the AMLC envelope upload protocol.
+            Per-partition retry-on-USBError with device reopen, ported from dustinlieu.
+        """
+        (part_size, part_offset) = self.validate_partition_size(part_name)
+        if part_size is None:
+            raise ValueError('Failed to validate partition size!')
+
+        for attempt in range(self.FAST_READ_RETRY_LIMIT):
+            try:
+                self.bulkcmd('amlmmc part 1', silent=True)
+                self.bulkcmd(f'upload store {part_name} normal {hex(part_size)}', silent=True)
+                self._fast_read_to_file(part_name, part_size, part_offset, outfile)
+                return
+            except (USBError, USBTimeoutError, ValueError) as ex:
+                self.print(f'  fast dump of "{part_name}" failed (attempt {attempt+1}/{self.FAST_READ_RETRY_LIMIT}): {ex}')
+                self._fast_reopen()
+            except Exception as ex:
+                print(f'Error while reading partition {part_name}, {ex}')
+                print(traceback.format_exc())
+                sys.exit(1)
+        print(f'Error: exceeded retry limit dumping partition {part_name}')
+        sys.exit(1)
+
+    def _fast_read_to_file(self, part_name, part_size, part_offset, outfile):
+        """ Inner loop of the AMLC envelope read. Truncates outfile and writes from offset 0. """
+        with open(outfile, 'wb') as ofl:
+            received = 0
+            first_chunk = True
+            start_time = time.time()
+            while received < part_size:
+                # Ask the device for the next envelope.
+                envelope = self.device.dev.ctrl_transfer(
+                    bmRequestType=usb.util.build_request_type(
+                        usb.util.CTRL_IN, usb.util.CTRL_TYPE_VENDOR, usb.util.CTRL_RECIPIENT_DEVICE),
+                    bRequest=self.AM_REQ_UPLOAD,
+                    wValue=0x1000,
+                    wIndex=16,
+                    data_or_wLength=16,
+                    timeout=10000,
+                )
+                if len(envelope) < 8:
+                    raise ValueError(f'short envelope: got {len(envelope)} bytes')
+                (header, segment_length) = struct.unpack('<II', bytes(envelope[:8]))
+                if header != 0xEFE8:
+                    raise ValueError(f'invalid envelope header: 0x{header:08x}')
+                if segment_length == 0 or segment_length > self.FAST_READ_SEGMENT_MAX:
+                    raise ValueError(f'bad segment length: {segment_length}')
+                if received + segment_length > part_size:
+                    # device claims more data than we asked for — clamp
+                    segment_length = part_size - received
+
+                # Drain this segment in 16K bulk reads.
+                seg_read = 0
+                while seg_read < segment_length:
+                    want = min(self.FAST_READ_BULK_CHUNK, segment_length - seg_read)
+                    chunk = self.device.dev.read(0x81, want, timeout=10000)
+                    ofl.write(bytes(chunk))
+                    seg_read += len(chunk)
+                received += seg_read
+
+                # progress
+                if first_chunk:
+                    first_chunk = False
+                else:
+                    stdout_clear_lines(2)
+                elapsed = max(time.time() - start_time, 1e-3)
+                speed = received / elapsed / 1024 / 1024
+                progress = round((received / part_size) * 100)
+                self.print(f'dumping partition: "{part_name}" {hex(part_offset)}+{hex(received)} into file: {outfile}')
+                self.print(f'segment: {seg_read/1024:.0f}KB | speed: {speed:.2f}MB/s | progress: {progress}% | {round(received/1024/1024)}/{round(part_size/1024/1024)}MB')
+
+    # ---------------------------------------------------------------------------
+    # Fast partition restore: pyamlboot writeMedia + "download store" protocol.
+    #
+    # Mirrors pyamlboot/optimus.py:_download_media:
+    #   1. bulkcmd `download store <part> normal <file_size>`
+    #   2. For each 64KB block: writeMedia(data, seq=N), then devRead an ack of
+    #      0x200 bytes — expecting `OK!!` (advance) or `Continue:32` (retry).
+    #   3. After all blocks, bulkcmd `download get_status`.
+    #
+    # Unlike the read path this is NOT ported from dustinlieu — he never implemented
+    # writes. It's the pyamlboot/optimus pattern applied to superbird. Verified on
+    # superbird hardware against logo (8MB) and system_a (516MB) partitions with
+    # round-trip and modify-write tests. Throughput is ack-bound at ~3.2 MB/s
+    # (per-block OK!!/Continue:32 handshake); reads do ~10.5 MB/s by comparison.
+    # ---------------------------------------------------------------------------
+
+    def _restore_partition_fast(self, part_name:str, infile:str):
+        """ Restore a partition using writeMedia (download store protocol). """
+        self.bulkcmd('amlmmc part 1', silent=True)
+        (part_size, part_offset) = self.validate_partition_size(part_name)
+        if part_size is None:
+            raise ValueError('Failed to validate partition size!')
+        try:
+            file_size = os.path.getsize(infile)
+            if part_name == 'bootloader':
+                part_size = 2 * 1024 * 1024
+                file_size = part_size
+            if file_size > part_size:
+                raise ValueError(f'File is larger than target partition: {file_size} vs {part_size}')
+
+            self.bulkcmd(f'download store {part_name} normal {hex(file_size)}', silent=True)
+            block_size = self.FAST_WRITE_BLOCK
+            with open(infile, 'rb') as ifl:
+                sent = 0
+                seq = 0
+                first_chunk = True
+                start_time = time.time()
+                while sent < file_size:
+                    data = ifl.read(block_size)
+                    if not data:
+                        break
+                    self._fast_write_block(data, seq)
+                    sent += len(data)
+                    seq += 1
+                    if first_chunk:
+                        first_chunk = False
+                    else:
+                        stdout_clear_lines(2)
+                    elapsed = max(time.time() - start_time, 1e-3)
+                    speed = sent / elapsed / 1024 / 1024
+                    progress = round((sent / file_size) * 100)
+                    self.print(f'writing partition: "{part_name}" {hex(part_offset)}+{hex(sent)} from file: {infile}')
+                    self.print(f'block: {len(data)/1024:.0f}KB | speed: {speed:.2f}MB/s | progress: {progress}% | {round(sent/1024/1024)}/{round(file_size/1024/1024)}MB')
+            # Finalize. Bootloader writes commonly hang on this status command.
+            ignore = (part_name == 'bootloader')
+            try:
+                self.bulkcmd('download get_status', silent=True, ignore_timeout=ignore)
+            except Exception:
+                if not ignore:
+                    raise
+            if part_name == 'bootloader':
+                time.sleep(2)
+        except Exception as ex:
+            print(f'Error while restoring partition {part_name}, {ex}')
+            print(traceback.format_exc())
+            sys.exit(1)
+
+    def _fast_write_block(self, data, seq):
+        """ Send one writeMedia block and read its ack, with the Continue:32 retry handshake
+            from pyamlboot/optimus.py:_try_write_media.
+        """
+        retry_times = 0
+        while True:
+            success = self.device.writeMedia(data, ackLen=self.FAST_WRITE_ACK_LEN,
+                                             seq=seq, retryTimes=retry_times)
+            if success:
+                start = time.time()
+                received = b''
+                last_exc = None
+                while True:
+                    try:
+                        received = bytes(self.device.devRead(self.FAST_WRITE_ACK_LEN, 1000).tobytes())
+                        last_exc = None
+                    except Exception as e:
+                        last_exc = e
+                        if time.time() - start > self.FAST_WRITE_ACK_TIMEOUT:
+                            raise
+                        continue
+                    if not received.startswith(b'Continue:32'):
+                        break
+                    time.sleep(3)
+                    if time.time() - start > self.FAST_WRITE_ACK_TIMEOUT:
+                        raise TimeoutError(f'writeMedia ack timeout at seq={seq}')
+                if received.startswith(b'OK!!'):
+                    return
+            retry_times += 1
+            if retry_times > self.FAST_WRITE_RESEND_TIMES:
+                raise RuntimeError(f'writeMedia failed at seq={seq} after {retry_times} retries')
+
+    def _fast_reopen(self):
+        """ Drop and re-open the USB device after an error. Equivalent to dustinlieu's reconnect(). """
+        try:
+            usb.util.dispose_resources(self.device.dev)
+        except Exception:
+            pass
+        time.sleep(1)
+        for _ in range(10):
+            try:
+                self.device = pyamlboot.AmlogicSoC()
+                return
+            except (ValueError, USBError):
+                time.sleep(1)
+        raise RuntimeError('could not reopen device after USB error')
+
+    def _dump_partition_legacy(self, part_name:str, outfile:str):
+        """ LEGACY path: dump given partition to a file
                 we cannot access the mmc directly,
                 but we can read from mmc into memory,
                 so we read it into memory, then read it from memory and append it to file, one chunk at a time
@@ -438,9 +663,9 @@ class SuperbirdDevice:
                 print(traceback.format_exc())
                 sys.exit(1)
 
-    def restore_partition(self, part_name:str, infile:str):
-        """ Restore given partition from given dump
-            Like with dump_partition, we first have to read it into RAM, then instruct the device to write it to mmc, one chunk at a time
+    def _restore_partition_legacy(self, part_name:str, infile:str):
+        """ LEGACY path: Restore given partition from given dump
+            Like with _dump_partition_legacy, we first have to read it into RAM, then instruct the device to write it to mmc, one chunk at a time
         """
         self.bulkcmd('amlmmc part 1', silent=True)
         (part_size, part_offset) = self.validate_partition_size(part_name)

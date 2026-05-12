@@ -6,6 +6,8 @@ which allows it to work on many more platforms!
 
 Everything in [`images/`](images/) came directly from [frederic's repo](https://github.com/frederic/superbird-bulkcmd).
 
+The fast partition-dump path (`upload store` AMLC envelope protocol) was ported from [dustinlieu/car-thing-bootloader-tool](https://github.com/dustinlieu/car-thing-bootloader-tool), which is MIT-licensed. The full license text and scope of the port is in [`LICENSES/car-thing-bootloader-tool-MIT.txt`](LICENSES/car-thing-bootloader-tool-MIT.txt).
+
 The purpose of this tool is to provide useful, working examples for how to use `pyamlboot` to perform development-related tasks on the Spotify Car Thing.
 
 Contributions are welcome. This code is unlicensed: you can do whatever you want with it.
