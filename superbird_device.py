@@ -178,7 +178,7 @@ class SuperbirdDevice:
     ADDR_TMP = 0x13000000
     # commands which cause a usb timeout when reading response
     #   for any other commands, we raise an exception if they cause a timeout
-    TIMEOUT_COMMANDS = ['booti', 'bootm', 'bootp', 'mw.b', 'reset', 'reboot']
+    TIMEOUT_COMMANDS = ['booti', 'amlmmc', 'bootm', 'bootp', 'mw.b', 'reset', 'reboot']
     PARTITIONS = SUPERBIRD_PARTITIONS
     PART_SECTOR_SIZE = 512  # bytes, size of sectors used in partition table
     MULTIPLIER = 8 # Can be reduced with --slow_burn or --slower_burn 
@@ -410,9 +410,76 @@ class SuperbirdDevice:
 
     def restore_partition(self, part_name:str, infile:str):
         """ restore given partition from a file, dispatching to fast or legacy implementation """
+        if part_name == 'bootloader':
+            infile = self._maybe_strip_info_sector(infile)
         if self.legacy_transfer:
             return self._restore_partition_legacy(part_name, infile)
         return self._restore_partition_fast(part_name, infile)
+
+    # ---------------------------------------------------------------------------
+    # Some toolchains (mainly the custom-u-boot scripts in the superbird-uboot
+    # tree) produce boot images that prepend a 512-byte Amlogic "info_sector"
+    # before the BL2+FIP payload, intended for direct `mmc write 0` to boot0/
+    # boot1 hwparts. The vendor's `download store bootloader` protocol generates
+    # its OWN info_sector at LBA 0 and writes the file content starting at
+    # LBA 1, so feeding it such a pre-pended image lands everything offset by
+    # one sector and BL2 fails the FIP HDR checksum on next boot (the visible
+    # symptom is BL2's diagnostic UART blast: "READ:0;CHK:1F" three times then
+    # the SD/USB fallback). Detect that header here and strip it transparently
+    # so the user can use either image format.
+    #
+    # info_sector signature (struct storage_emmc_boot_info in spsgsb/uboot's
+    # include/amlogic/aml_mmc.h, rebuilt from RE):
+    #   u32[0]  = 1                (version)
+    #   u32[1]  = 0x12000          (page size / DDR-init blob size)
+    #   u32[4]  = 0x4000           (BL2 size)
+    #   u32[5]  = 0x4              (sg_count, hwparts)
+    #   u32[127]= sum(u32[0..126]) (checksum, mod 2^32)
+    # We require all five to match before stripping — that combination is
+    # specific enough that a false-positive on a real bootloader.dump is
+    # effectively impossible (the dump's first sector is BL2's first 512 bytes,
+    # which won't have an arithmetic checksum at the right offset).
+    # ---------------------------------------------------------------------------
+    INFO_SECTOR_SIZE = 512
+
+    @classmethod
+    def _looks_like_info_sector(cls, first_sector: bytes) -> bool:
+        if len(first_sector) < cls.INFO_SECTOR_SIZE:
+            return False
+        try:
+            words = struct.unpack_from('<128I', first_sector, 0)
+        except struct.error:
+            return False
+        if words[0] != 1 or words[1] != 0x12000:
+            return False
+        if words[4] != 0x4000 or words[5] != 0x4:
+            return False
+        checksum = sum(words[:127]) & 0xffffffff
+        return checksum == words[127]
+
+    def _maybe_strip_info_sector(self, infile: str) -> str:
+        """ If `infile` starts with an Amlogic info_sector, write a stripped
+            copy to a tempfile and return its path. Otherwise return infile
+            unchanged. """
+        try:
+            with open(infile, 'rb') as f:
+                head = f.read(self.INFO_SECTOR_SIZE)
+        except OSError:
+            return infile
+        if not self._looks_like_info_sector(head):
+            return infile
+        file_size = os.path.getsize(infile)
+        stripped_size = file_size - self.INFO_SECTOR_SIZE
+        tmp = f'/tmp/_superbird_bootloader_stripped.{os.getpid()}.bin'
+        with open(infile, 'rb') as src, open(tmp, 'wb') as dst:
+            src.seek(self.INFO_SECTOR_SIZE)
+            dst.write(src.read())
+        self.print(
+            f'[bootloader] detected leading info_sector in "{infile}" — '
+            f'stripped 512 bytes ({file_size} -> {stripped_size}); '
+            f'vendor download-store will generate its own info_sector at LBA 0'
+        )
+        return tmp
 
     # ---------------------------------------------------------------------------
     # Fast partition dump: AMLC-envelope "upload store" protocol.
