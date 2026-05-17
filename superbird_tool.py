@@ -205,11 +205,24 @@ def cmd_convert_env_dump(args, dev):
 
 
 def cmd_burn_mode(args, dev):
-    if check_device_mode('usb-burn', silent=True):
+    # --burn_mode supports an optional FIP-body argument: when supplied,
+    # mask-ROM → BL2 will load that file instead of the bundled vendor
+    # burn-mode u-boot. Useful for booting a custom u-boot purely from
+    # RAM without touching boot0/boot1.
+    custom = args.burn_mode if isinstance(args.burn_mode, str) else None
+    if custom and check_device_mode('usb-burn', silent=True):
+        # Custom-bootloader load only works from mask-ROM (the AMLC handshake
+        # is initiated by BL2, which has already run once burn-mode is up).
+        print('Device is in vendor USB Burn Mode; custom u-boot load needs to '
+              'start from mask-ROM USB Mode. Power-cycle into mask-ROM '
+              '(buttons 1+4 + reset) and retry.')
+        sys.exit(1)
+    if not custom and check_device_mode('usb-burn', silent=True):
         print('Device already in USB Burn Mode')
         return
     # enter_burn_mode prints its own "Device is now in USB Burn Mode" on success.
-    if enter_burn_mode(dev) is None:
+    result = enter_burn_mode(dev, custom_bootloader=custom)
+    if result is None and not custom:
         sys.exit(1)
 
 
@@ -497,7 +510,12 @@ def build_device(args):
 HELP_TEXT = """General:
   -h, --help            Show this help message and exit
   --find_device         Find superbird device and show its current boot mode
-  --burn_mode           Enter USB Burn Mode (if currently in USB Mode)
+  --burn_mode [CUSTOM_FIP]
+                        Enter USB Burn Mode (if currently in USB Mode).
+                        With a CUSTOM_FIP path, RAM-load a custom signed FIP
+                        body (e.g. aml_encrypt_g12a --bootsig output) instead
+                        of vendor burn-mode u-boot. Must be signed with a key
+                        matching the SoC's fused secure-boot ROM key hash.
   --continue_boot       Continue booting normally (if currently in USB Burn Mode)
 
 Booting:
@@ -553,7 +571,11 @@ def build_parser():
                                 add_help=False)
     # commands
     p.add_argument('--find_device',             action='store_true')
-    p.add_argument('--burn_mode',               action='store_true')
+    p.add_argument('--burn_mode',               nargs='?', const=True, default=False,
+                   metavar='CUSTOM_FIP',
+                   help='Enter vendor burn mode (no arg), or RAM-load a custom '
+                        'signed FIP body (with arg). FIP must be RSA-signed '
+                        'with a key whose hash matches the SoC secure-boot fuses.')
     p.add_argument('--continue_boot',           action='store_true')
     p.add_argument('--bulkcmd',                 type=str, nargs=1, metavar='COMMAND')
     p.add_argument('--bulkcmd_shell',           action='store_true')

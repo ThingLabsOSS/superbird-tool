@@ -120,14 +120,44 @@ def check_device_mode(mode:str, silent:bool=False):
             print("Make sure you've installed the correct driver using Zadig.")
     return False
 
-def enter_burn_mode(dev):
-    """ check device mode and enter burn mode if needed
-        returns a new device object, or None if failure
+def enter_burn_mode(dev, custom_bootloader: str = None):
+    """ check device mode and enter burn mode if needed.
+
+        custom_bootloader: optional path to a signed FIP body (e.g. an
+            aml_encrypt_g12a --bootsig output containing your own u-boot
+            as BL33) to substitute for the bundled vendor burn-mode
+            u-boot. BL2 still RSA-validates the FIP signature, so the
+            file must be signed with a key whose hash matches what's
+            fused in the SoC's secure-boot ROM keys.
+
+            When set, the post-load "wait for vendor burn-mode bulkcmd
+            ready" polling is skipped: your u-boot may come up as a
+            different USB gadget (e.g. 18d1:fada Android-fastboot
+            instead of 1b8e:c003 Amlogic-burn) and won't respond to
+            vendor bulkcmds at all. The function returns None in this
+            case and the caller is expected not to issue bulkcmds.
+
+        returns a new SuperbirdDevice in burn mode (vendor path), or
+        None either on failure OR on success with a custom_bootloader
+        (since the resulting device isn't in vendor burn mode).
     """
     dev_mode = find_device()
     if dev_mode == 'usb-burn':
+        if custom_bootloader:
+            print('Device is already in vendor USB Burn Mode — custom '
+                  'bootloader load requires starting from mask-ROM USB Mode. '
+                  'Power-cycle into mask-ROM (buttons 1+4 + reset) and retry.')
+            return None
         return dev
     elif dev_mode == 'usb':
+        if custom_bootloader:
+            print(f'Entering custom u-boot via mask-ROM → BL2 → {custom_bootloader}')
+            dev.bl2_boot(str(IMAGES_PATH / 'superbird.bl2.encrypted.bin'),
+                         custom_bootloader)
+            print('Custom bootloader handed off to BL2. Skipping vendor '
+                  'burn-mode readiness polling — your u-boot is now running.')
+            print('Check for it on the host with `lsusb` (your gadget VID:PID).')
+            return None
         print('Entering USB Burn Mode')
         dev.bl2_boot(str(IMAGES_PATH / 'superbird.bl2.encrypted.bin'),
                      str(IMAGES_PATH / 'superbird.bootloader.img'))
