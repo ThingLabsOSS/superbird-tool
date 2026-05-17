@@ -6,10 +6,10 @@
 # dhclient will use DHCP to request an IP from whatever you plug the car thing into
 # dhserver will start a DHCP server on the carthing. Your PC will get an IP of 192.168.7.1
 
-rndisEnable="true" # Set to false if you only want ADBa
+rndisEnable="true" # Set to false if you only want ADB
 ipMode="dhserver"
 
-printToKmsg() { echo "USB_GADGET: $1" && echo "USB_GADGET: $1" > /dev/kmsg; } # Log to dmesg for easier debugging
+printToKmsg() { echo "USB_GADGET: $1"; echo "USB_GADGET: $1" > /dev/kmsg; } # Log to dmesg for easier debugging
 usbGadgetDir="/sys/kernel/config/usb_gadget/g1"
 
 case "$1" in
@@ -17,7 +17,7 @@ case "$1" in
 		printToKmsg "configuring USB Gadget with adb and rndis (if enabled)"
 		# Create device nodes
 		mkdir -p /dev/usb-ffs/adb
-		mount -t configfs none /sys/kernel/config/
+		mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config/
 
 		# Create USB gadget
 		printToKmsg "Creating USB gadget"
@@ -38,7 +38,7 @@ case "$1" in
 
 		# Create the gadget config
 		printToKmsg "Creating gadget config"
-		mkdir "${usbGadgetDir}"/configs/c.1
+		mkdir -p "${usbGadgetDir}"/configs/c.1
 		echo "500" > "${usbGadgetDir}"/configs/c.1/MaxPower
 
 		# ------ ADB Configuration ------
@@ -69,14 +69,18 @@ case "$1" in
 		ln -s "${usbGadgetDir}"/configs/c.1 "${usbGadgetDir}"/os_desc
 		# Bind gadget to the USB device
 		printToKmsg "Binding gadget to USB device"
-		UDC_DEVICE=$(ls -1 /sys/class/udc/)
+		UDC_DEVICE=$(ls /sys/class/udc/ | head -n1)
 		echo "$UDC_DEVICE" > /sys/kernel/config/usb_gadget/g1/UDC
 
 		# ----- usb0 Configuration
 		if [[ $rndisEnable = "true" ]]; then
 		    printToKmsg "Configuring usb0"
 		    ntpd # Start NTPd. If we get an IP thru DHCP this will sync the clock
-		    sleep 3s # Wait a few seconds to allow the interface to come up
+		    # Wait for the rndis function to register usb0 (poll up to ~5s)
+		    for i in 1 2 3 4 5 6 7 8 9 10; do
+			[ -e /sys/class/net/usb0 ] && break
+			sleep 0.5
+		    done
 		    ifconfig usb0 up
 		    if [[ $ipMode = "static" ]] || [[ $ipMode = "dhserver" ]]; then
 			# If you edit these values, you also need to edit the files in /etc/coredhcp to match
@@ -96,10 +100,9 @@ case "$1" in
 		    fi
 		fi
 
-		# Prevent the restart_usb script from interfering
+		# Marker file used by /sbin/restart_usb to gate on init completion
 		printToKmsg "Creating complete flag"
 		echo 1 > /var/run/usb_gadget_done
-		chattr +i /var/run/usb_gadget_done
 
 		printToKmsg "USB done"
 		;;

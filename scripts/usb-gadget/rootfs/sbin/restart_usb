@@ -1,6 +1,6 @@
 #!/bin/sh
 
-printToKmsg() { echo $1 && echo $1 > /dev/kmsg; } # Log to dmesg for easier debugging
+printToKmsg() { echo "$1"; echo "$1" > /dev/kmsg; } # Log to dmesg for easier debugging
 
 # Keeps this script from interfering with S49usbgadget on boot
 if [ -e /var/run/usb_gadget_done ]; then
@@ -32,12 +32,12 @@ if [[ "$USB_STATE" == "CONFIGURED" ]]; then
    printToKmsg "restart_usb: Do nothing."
 elif [[ "$USB_STATE" == "CONNECTED" ]]; then
    printToKmsg "Configuring without restarting"
-   echo $(ls -1 /sys/class/udc/) > /sys/kernel/config/usb_gadget/g1/UDC
+   ls /sys/class/udc/ | head -n1 > /sys/kernel/config/usb_gadget/g1/UDC
 else
    printToKmsg "restart_usb: Restarting USB"
    sleep 5 # Give the computer time to fully wake up
    echo "" > /sys/kernel/config/usb_gadget/g1/UDC
-   echo $(ls -1 /sys/class/udc/) > /sys/kernel/config/usb_gadget/g1/UDC
+   ls /sys/class/udc/ | head -n1 > /sys/kernel/config/usb_gadget/g1/UDC
 fi
 
 printToKmsg "restart_usb: done"
