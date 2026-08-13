@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — August 13, 2026
 
-Shipped on `main` since 0.2.0. `VERSION` in `superbird_tool.py` still reads
-`0.2.0` — bump it when these are cut as a release.
+Also marks this toolkit as superseded by [terbium.app](https://terbium.app) and
+[flashthing](https://github.com/JoeyEamigh/flashthing); see the Readme.
 
 * Added `--chainload BINFILE` — load an aarch64 binary into RAM from burn mode
   and `go` to it. `--load_addr ADDR` overrides the default `0x01080000`.

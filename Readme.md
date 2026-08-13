@@ -1,5 +1,21 @@
 # Cross-Platform Spotify Car Thing (superbird) hacking toolkit
 
+> ## ⚠️ Superseded
+>
+> **This tool is no longer the recommended way to flash a Car Thing.** It still
+> works, and the low-level examples remain useful, but two newer projects have
+> taken over day-to-day use:
+>
+> - **[terbium.app](https://terbium.app)** — browser-based, nothing to install.
+>   The easy path for most people.
+> - **[JoeyEamigh/flashthing](https://github.com/JoeyEamigh/flashthing)** —
+>   `flashthing-cli`, the maintained command-line flasher. This is what the
+>   mainline u-boot / Yocto workflow uses.
+>
+> Reach for this repo when you want a readable `pyamlboot` reference, the
+> vendor-layout dump/restore commands, or something the newer tools don't
+> expose yet. Expect maintenance to be occasional.
+
 This toolkit re-implements most of the functionality from [frederic's scripts](https://github.com/frederic/superbird-bulkcmd).
 The key difference here is that this tool uses [`pyamlboot`](https://github.com/superna9999/pyamlboot) instead of the proprietary `update` binary from Amlogic, 
 which allows it to work on many more platforms!

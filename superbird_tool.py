@@ -27,7 +27,7 @@ from superbird_device import (
 )
 from uboot_env import read_environ
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 
 # ---------------------------------------------------------------------------
 # Tables that drive --dump_device / --restore_device.
