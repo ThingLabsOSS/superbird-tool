@@ -77,7 +77,9 @@ python3 -m pip install git+https://github.com/superna9999/pyamlboot
 ./superbird_tool.py --find_device
 
 # If you get "Access Denied" errors, run the following commands (alternatively you can run superbird_tool as root)
-sudo su -c 'echo \"SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"1b8e\", ATTRS{idProduct}==\"c003\", GROUP=\"$SUDO_USER\", MODE=\"0666\" > /etc/udev/rules.d/60-superbird.rules'
+sudo tee /etc/udev/rules.d/60-superbird.rules >/dev/null <<EOF
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1b8e", ATTRS{idProduct}=="c003", GROUP="$USER", MODE="0666"
+EOF
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
@@ -118,7 +120,12 @@ python superbird_tool.py --burn_mode
 General:
   -h, --help            Show this help message and exit
   --find_device         Find superbird device and show its current boot mode
-  --burn_mode           Enter USB Burn Mode (if currently in USB Mode)
+  --burn_mode [CUSTOM_FIP]
+                        Enter USB Burn Mode (if currently in USB Mode).
+                        With a CUSTOM_FIP path, RAM-load a custom signed FIP
+                        body (e.g. aml_encrypt_g12a --bootsig output) instead
+                        of vendor burn-mode u-boot. Must be signed with a key
+                        matching the SoC's fused secure-boot ROM key hash.
   --continue_boot       Continue booting normally (if currently in USB Burn Mode)
 
 Booting:
@@ -141,8 +148,10 @@ Restoring:
   --restore_partition PARTITION_NAME INPUT_FILE
                         Restore a partition from a dump file
   --dont_reset          Don't factory reset when restoring device. Use in combination with restore commands.
-  --slow_burn           Use a slower burning speed. Use this if restoring crashes mid-flash.
-  --slower_burn         Use an even slower burning speed. Use this if --slow_burn doesn't work.
+  --slow_burn           Use a slower burning speed. Use this if restoring crashes mid-flash. (forces legacy path)
+  --slower_burn         Use an even slower burning speed. (forces legacy path)
+  --legacy_transfer     Force the old (slow) amlmmc read/write transfer path.
+                        Default is the faster upload/download store path. Try this if dump/restore misbehaves.
 
 Dumping:
   --dump_device OUTPUT_FOLDER
@@ -160,8 +169,10 @@ U-Boot Enviroment:
                         Convert a local dump of env partition into text format
 Advanced:
   --bulkcmd COMMAND     Run a uboot command on the device
-  --enable_uart_shell   Enable UART shell
-
+  --bulkcmd_shell       Open a pseudo-shell for sending uboot commands
+  --chainload BINFILE   Load an aarch64 binary into RAM and `go` to it.
+                        Use --load_addr ADDR to override default (0x01080000).
+  --enable_uart_shell   Enable Linux UART shell
 ```
 
 ## Boot Modes

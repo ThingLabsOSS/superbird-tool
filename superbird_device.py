@@ -205,6 +205,10 @@ class SuperbirdDevice:
     ADDR_BL2 = 0xfffa0000
     ADDR_KERNEL = 0x01080000
     ADDR_INITRD = 0x13000000
+    # Scratch DRAM for staging a partition image before writing it to eMMC.
+    # Chosen to sit clear of the kernel/initrd load addresses vendor u-boot
+    # uses, so a staged image can't be clobbered by a boot attempt. Kept in
+    # sync with fip-tool's dramStagingAddr.
     ADDR_TMP = 0x13000000
     # commands which cause a usb timeout when reading response
     #   for any other commands, we raise an exception if they cause a timeout

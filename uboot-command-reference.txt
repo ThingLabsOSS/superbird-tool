@@ -1,5 +1,10 @@
 u-boot command reference for superbird
 
+NOTE: this is the VENDOR u-boot 2015.01 command set, i.e. what you get in
+burn mode / mask-ROM, which is the only u-boot superbird-tool talks to.
+It is NOT the mainline u-boot from the sibling superbird-uboot project --
+that has no bulkcmd/AMLC support once booted, and a different command set.
+
 These are the base-level uboot commands:
 
 aml_sysrecovery- Burning with amlogic format package from partition sysrecovery

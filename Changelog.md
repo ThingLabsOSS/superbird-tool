@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+Shipped on `main` since 0.2.0. `VERSION` in `superbird_tool.py` still reads
+`0.2.0` — bump it when these are cut as a release.
+
+* Added `--chainload BINFILE` — load an aarch64 binary into RAM from burn mode
+  and `go` to it. `--load_addr ADDR` overrides the default `0x01080000`.
+* `--burn_mode` now takes an optional `CUSTOM_FIP` path, RAM-loading a custom
+  signed FIP body instead of vendor burn-mode u-boot. The FIP must be signed
+  with a key matching the SoC's fused ROM key hash.
+* Added fast partition dump/restore via the upload/download-store path, now the
+  default. `--legacy_transfer` forces the old `amlmmc` read/write path.
+  `--slow_burn` / `--slower_burn` also force the legacy path.
+* `--restore_partition` auto-strips a leading info_sector when writing the
+  bootloader partition, so a full boot-partition image can be restored directly.
+* `--burn_mode` polls for u-boot readiness after `bl2_boot` instead of racing it.
+* `stock_env.txt` is now located independently of the current working directory.
+* Root is no longer required (see the udev rule in the Readme).
+
+
 ## 0.2.0
 * Added `--bulkcmd_shell`
 
